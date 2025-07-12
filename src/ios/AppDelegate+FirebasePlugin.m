@@ -3,6 +3,7 @@
 #import "FirebaseWrapper.h"
 #import <objc/runtime.h>
 
+#import "Klender-Swift.h"
 
 @import UserNotifications;
 @import FirebaseFirestore;
@@ -200,14 +201,10 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
     @try{
         [[FIRMessaging messaging] appDidReceiveMessage:userInfo];
         mutableUserInfo = [userInfo mutableCopy];
+        [self handleAppointmentFromPayload:mutableUserInfo];
         NSDictionary* aps = [mutableUserInfo objectForKey:@"aps"];
-        bool isContentAvailable = false;
+        bool isContentAvailable = [self isContentAvailable:userInfo];
         if([aps objectForKey:@"alert"] != nil){
-            
-            if([aps objectForKey:@"content-available"] != nil){
-                NSNumber* contentAvailable = (NSNumber*) [aps objectForKey:@"content-available"];
-                isContentAvailable = [contentAvailable isEqualToNumber:[NSNumber numberWithInt:1]];
-            }
             [mutableUserInfo setValue:@"notification" forKey:@"messageType"];
             NSString* tap;
             if([self.applicationInBackground isEqual:[NSNumber numberWithBool:YES]] && !isContentAvailable){
@@ -233,6 +230,95 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
         [FirebasePlugin.firebasePlugin handlePluginExceptionWithoutContext:exception];
     }
 }
+
+
+- (void)handleAppointmentFromPayload:(NSDictionary *)userInfo {
+    id appointmentString = [userInfo objectForKey:@"appointment"];
+    if (appointmentString && [appointmentString isKindOfClass:[NSString class]]) {
+        NSLog(@"appointments: %@", appointmentString);
+        NSData *data = [appointmentString dataUsingEncoding:NSUTF8StringEncoding];
+        NSError *jsonError = nil;
+        NSDictionary *appointment = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
+    
+        if (jsonError || ![appointment isKindOfClass:[NSDictionary class]]) {
+            NSLog(@"Failed to parse appointment JSON: %@", jsonError.localizedDescription);
+            return;
+        }
+        
+        NSString *eventId = appointment[@"id"];
+        if (!eventId) return;
+        
+        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"group.nl.klender.shareextension"];
+        NSString *storedJson = [[defaults stringForKey:@"events"] mutableCopy];
+        NSMutableArray *storedEvents = [NSMutableArray array];
+        
+        if (storedJson) {
+            NSData *storedData = [storedJson dataUsingEncoding:NSUTF8StringEncoding];
+            NSArray *parsedEvents = [NSJSONSerialization JSONObjectWithData:storedData options:0 error:&jsonError];
+            if (!jsonError && [parsedEvents isKindOfClass:[NSArray class]]) {
+                storedEvents = [parsedEvents mutableCopy];
+            }
+        }
+        
+        NSLog(@"appointments stored: %lu", (unsigned long)storedEvents.count);
+        
+        if (appointment[@"isNew"]) {
+            // Check if event is within next 2 days
+            NSString *startStr = appointment[@"start"];
+            NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+            formatter.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss";
+            NSDate *startDate = [formatter dateFromString:startStr];
+            NSDate *now = [NSDate date];
+            NSDate *twoDaysFromNow = [now dateByAddingTimeInterval:2 * 24 * 60 * 60];
+
+            if (startDate && [startDate compare:now] == NSOrderedDescending && [startDate compare:twoDaysFromNow] == NSOrderedAscending) {
+                // Add if not already present
+                BOOL exists = NO;
+                for (NSDictionary *event in storedEvents) {
+                    if ([event[@"id"] isEqualToString:eventId]) {
+                        exists = YES;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    [storedEvents addObject:appointment];
+                }
+            }
+        } else if (appointment[@"deleted"]) {
+            // Remove event
+            NSPredicate *predicate = [NSPredicate predicateWithFormat:@"id != %@", eventId];
+            NSArray *filtered = [storedEvents filteredArrayUsingPredicate:predicate];
+            storedEvents = [filtered mutableCopy];
+        } else {
+            // Update existing or add if not present
+            BOOL updated = NO;
+            for (NSInteger i = 0; i < storedEvents.count; i++) {
+                NSDictionary *existing = storedEvents[i];
+                if ([existing[@"id"] isEqualToString:eventId]) {
+                    storedEvents[i] = appointment;
+                    updated = YES;
+                    break;
+                }
+            }
+            if (!updated) {
+                [storedEvents addObject:appointment];
+            }
+        }
+
+        NSLog(@"appointments stored: %lu", (unsigned long)storedEvents.count);
+        // Serialize back to string and store
+        NSData *updatedData = [NSJSONSerialization dataWithJSONObject:storedEvents options:0 error:&jsonError];
+        if (!jsonError && updatedData) {
+            NSString *updatedJsonStr = [[NSString alloc] initWithData:updatedData encoding:NSUTF8StringEncoding];
+            [defaults setObject:updatedJsonStr forKey:@"events"];
+            [defaults synchronize];
+        } else {
+            NSLog(@"Failed to serialize updated appointments: %@", jsonError.localizedDescription);
+        }
+    }
+    [WidgetRefresher reloadSpecificWidgetWithKind:@"WidgetExt"];
+}
+
 
 // Scans a message for keys which indicate a notification should be shown.
 // If found, extracts relevant keys and uses then to display a local notification
@@ -395,18 +481,14 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
 
         
         NSDictionary* aps = [mutableUserInfo objectForKey:@"aps"];
-        bool isContentAvailable = [[aps objectForKey:@"content-available"] isEqualToNumber:[NSNumber numberWithInt:1]];
-        if(isContentAvailable){
-            [FirebasePlugin.firebasePlugin _logError:@"willPresentNotification: aborting as content-available:1 so system notification will be shown"];
-            return;
-        }
-        
         bool showForegroundNotification = [mutableUserInfo objectForKey:@"notification_foreground"];
         bool hasAlert = [aps objectForKey:@"alert"] != nil;
         bool hasBadge = [aps objectForKey:@"badge"] != nil;
         bool hasSound = [aps objectForKey:@"sound"] != nil;
 
-        if(showForegroundNotification){
+        bool isContentAvailable = [self isContentAvailable:mutableUserInfo];
+
+        if(showForegroundNotification && isContentAvailable){
             [FirebasePlugin.firebasePlugin _logMessage:[NSString stringWithFormat:@"willPresentNotification: foreground notification alert=%@, badge=%@, sound=%@", hasAlert ? @"YES" : @"NO", hasBadge ? @"YES" : @"NO", hasSound ? @"YES" : @"NO"]];
             if(hasAlert && hasBadge && hasSound){
                 completionHandler(UNNotificationPresentationOptionAlert + UNNotificationPresentationOptionBadge + UNNotificationPresentationOptionSound);
@@ -448,9 +530,9 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
             if (_prevUserNotificationCenterDelegate) {
                 // bubbling event
                 [_prevUserNotificationCenterDelegate
-                	userNotificationCenter:center
-                	didReceiveNotificationResponse:response
-                	withCompletionHandler:completionHandler
+                    userNotificationCenter:center
+                    didReceiveNotificationResponse:response
+                    withCompletionHandler:completionHandler
                 ];
                 return;
             } else {
@@ -524,6 +606,8 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
                     [result setValue:@"true" forKey:@"instantVerification"];
                     [result setValue:key forKey:@"id"];
                     [result setValue:idToken forKey:@"idToken"];
+                    [result setValue:rawNonce forKey:@"rawNonce"];
+
                     if(appleIDCredential.fullName != nil){
                         if(appleIDCredential.fullName.givenName != nil){
                             [result setValue:appleIDCredential.fullName.givenName forKey:@"givenName"];
@@ -562,4 +646,17 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
     return self.viewController.view.window;
 }
 
+- (bool) isContentAvailable:(NSDictionary*) userInfo {
+    if(userInfo == nil) {
+        return false;
+    }
+
+    NSDictionary* aps = [userInfo objectForKey:@"aps"];
+    if(aps == nil){
+        return false;
+    }
+    
+    return ([aps objectForKey:@"'content-available'"] != nil && [[aps objectForKey:@"'content-available'"] isEqualToNumber:[NSNumber numberWithInt:1]])
+        || ([aps objectForKey:@"content-available"] != nil && [[aps objectForKey:@"content-available"] isEqualToNumber:[NSNumber numberWithInt:1]]);
+}
 @end
