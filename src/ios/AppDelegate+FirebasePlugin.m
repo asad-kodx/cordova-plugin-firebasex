@@ -203,8 +203,13 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
         mutableUserInfo = [userInfo mutableCopy];
         [self handleAppointmentFromPayload:mutableUserInfo];
         NSDictionary* aps = [mutableUserInfo objectForKey:@"aps"];
-        bool isContentAvailable = [self isContentAvailable:userInfo];
+        bool isContentAvailable = false;
         if([aps objectForKey:@"alert"] != nil){
+            
+            if([aps objectForKey:@"content-available"] != nil){
+                NSNumber* contentAvailable = (NSNumber*) [aps objectForKey:@"content-available"];
+                isContentAvailable = [contentAvailable isEqualToNumber:[NSNumber numberWithInt:1]];
+            }
             [mutableUserInfo setValue:@"notification" forKey:@"messageType"];
             NSString* tap;
             if([self.applicationInBackground isEqual:[NSNumber numberWithBool:YES]] && !isContentAvailable){
@@ -318,7 +323,6 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
     }
     [WidgetRefresher reloadSpecificWidgetWithKind:@"WidgetExt"];
 }
-
 
 // Scans a message for keys which indicate a notification should be shown.
 // If found, extracts relevant keys and uses then to display a local notification
@@ -481,14 +485,18 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
 
         
         NSDictionary* aps = [mutableUserInfo objectForKey:@"aps"];
+        bool isContentAvailable = [[aps objectForKey:@"content-available"] isEqualToNumber:[NSNumber numberWithInt:1]];
+        if(isContentAvailable){
+            [FirebasePlugin.firebasePlugin _logError:@"willPresentNotification: aborting as content-available:1 so system notification will be shown"];
+            return;
+        }
+        
         bool showForegroundNotification = [mutableUserInfo objectForKey:@"notification_foreground"];
         bool hasAlert = [aps objectForKey:@"alert"] != nil;
         bool hasBadge = [aps objectForKey:@"badge"] != nil;
         bool hasSound = [aps objectForKey:@"sound"] != nil;
 
-        bool isContentAvailable = [self isContentAvailable:mutableUserInfo];
-
-        if(showForegroundNotification && isContentAvailable){
+        if(showForegroundNotification){
             [FirebasePlugin.firebasePlugin _logMessage:[NSString stringWithFormat:@"willPresentNotification: foreground notification alert=%@, badge=%@, sound=%@", hasAlert ? @"YES" : @"NO", hasBadge ? @"YES" : @"NO", hasSound ? @"YES" : @"NO"]];
             if(hasAlert && hasBadge && hasSound){
                 completionHandler(UNNotificationPresentationOptionAlert + UNNotificationPresentationOptionBadge + UNNotificationPresentationOptionSound);
@@ -606,8 +614,6 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
                     [result setValue:@"true" forKey:@"instantVerification"];
                     [result setValue:key forKey:@"id"];
                     [result setValue:idToken forKey:@"idToken"];
-                    [result setValue:rawNonce forKey:@"rawNonce"];
-
                     if(appleIDCredential.fullName != nil){
                         if(appleIDCredential.fullName.givenName != nil){
                             [result setValue:appleIDCredential.fullName.givenName forKey:@"givenName"];
@@ -646,17 +652,4 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
     return self.viewController.view.window;
 }
 
-- (bool) isContentAvailable:(NSDictionary*) userInfo {
-    if(userInfo == nil) {
-        return false;
-    }
-
-    NSDictionary* aps = [userInfo objectForKey:@"aps"];
-    if(aps == nil){
-        return false;
-    }
-    
-    return ([aps objectForKey:@"'content-available'"] != nil && [[aps objectForKey:@"'content-available'"] isEqualToNumber:[NSNumber numberWithInt:1]])
-        || ([aps objectForKey:@"content-available"] != nil && [[aps objectForKey:@"content-available"] isEqualToNumber:[NSNumber numberWithInt:1]]);
-}
 @end
