@@ -300,7 +300,27 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
             for (NSInteger i = 0; i < storedEvents.count; i++) {
                 NSDictionary *existing = storedEvents[i];
                 if ([existing[@"id"] isEqualToString:eventId]) {
-                    storedEvents[i] = appointment;
+                    NSMutableDictionary *updatedEvent = [existing mutableCopy];
+
+                    // Update only required fields
+                    if (appointment[@"summary"]) {
+                        updatedEvent[@"summary"] = appointment[@"summary"];
+                    }
+                    if (appointment[@"start"]) {
+                        updatedEvent[@"start"] = appointment[@"start"];
+                    }
+                    if (appointment[@"end"]) {
+                        updatedEvent[@"end"] = appointment[@"end"];
+                    }
+                    if (appointment[@"rrule"]) {
+                        updatedEvent[@"rrule"] = appointment[@"rrule"];
+                    }
+                    if (appointment[@"exdates"]) {
+                        updatedEvent[@"exdates"] = appointment[@"exdates"];
+                    }
+
+
+                    storedEvents[i] = updatedEvent;
                     updated = YES;
                     break;
                 }
@@ -315,6 +335,7 @@ static __weak id <UNUserNotificationCenterDelegate> _prevUserNotificationCenterD
         NSData *updatedData = [NSJSONSerialization dataWithJSONObject:storedEvents options:0 error:&jsonError];
         if (!jsonError && updatedData) {
             NSString *updatedJsonStr = [[NSString alloc] initWithData:updatedData encoding:NSUTF8StringEncoding];
+            NSLog(@"appointments stored json: %@", updatedJsonStr);
             [defaults setObject:updatedJsonStr forKey:@"events"];
             [defaults synchronize];
         } else {
